@@ -1,0 +1,10 @@
+* text=auto
+
+*.lua text
+*.toc text
+*.md  text
+
+# Keep repo-only files out of "Download ZIP" / release archives
+.gitignore     export-ignore
+.gitattributes export-ignore
+.editorconfig  export-ignore

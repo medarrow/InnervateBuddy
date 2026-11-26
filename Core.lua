@@ -1,0 +1,957 @@
+-- InnervateBuddy - Core
+-- Written for the 1.12 client (Lua 5.0): uses this/arg1/event globals, table.getn, string.find.
+
+InnervateBuddy = InnervateBuddy or {}
+local IB = InnervateBuddy
+
+IB.version = "1.1.0"
+
+local INNERVATE       = "Innervate"
+local INNERVATE_RANGE = 30
+local TEX             = "Interface\\ChatFrame\\ChatFrameBackground"
+local FONT            = "Fonts\\FRIZQT__.TTF"
+local ROW_H, ROW_GAP, PAD, HEADER_H = 14, 1, 2, 14
+local UPDATE_RATE     = 0.2
+local DETECT_MIN      = 3                 -- weighted casts needed before a role is decided
+local DETECT_EXPIRE   = 3 * 24 * 3600     -- forget detections older than 3 days
+
+IB.CLASS_COLORS = {
+    DRUID   = { r = 1.00, g = 0.49, b = 0.04 },
+    HUNTER  = { r = 0.67, g = 0.83, b = 0.45 },
+    MAGE    = { r = 0.41, g = 0.80, b = 0.94 },
+    PALADIN = { r = 0.96, g = 0.55, b = 0.73 },
+    PRIEST  = { r = 1.00, g = 1.00, b = 1.00 },
+    SHAMAN  = { r = 0.00, g = 0.44, b = 0.87 },
+    WARLOCK = { r = 0.58, g = 0.51, b = 0.79 },
+}
+
+IB.HEAL_CLASSES     = { PRIEST = true, DRUID = true, SHAMAN = true, PALADIN = true }
+IB.DPS_MANA_CLASSES = { MAGE = true, WARLOCK = true, HUNTER = true }
+
+-- spell name -> weight. Seen from a group member, these push them toward healer / dps.
+IB.HEAL_SPELLS = {
+    ["Heal"] = 1, ["Lesser Heal"] = 1, ["Greater Heal"] = 2, ["Flash Heal"] = 1,
+    ["Renew"] = 1, ["Prayer of Healing"] = 2, ["Holy Nova"] = 1,
+    ["Healing Touch"] = 1, ["Rejuvenation"] = 1, ["Regrowth"] = 1, ["Tranquility"] = 2,
+    ["Swiftmend"] = 3,
+    ["Healing Wave"] = 1, ["Lesser Healing Wave"] = 1, ["Chain Heal"] = 2,
+    ["Holy Light"] = 1, ["Flash of Light"] = 1, ["Holy Shock"] = 2,
+}
+IB.DPS_SPELLS = {
+    ["Mind Flay"] = 2, ["Mind Blast"] = 1, ["Shadowform"] = 10, ["Vampiric Embrace"] = 3,
+    ["Starfire"] = 2, ["Wrath"] = 1, ["Insect Swarm"] = 2, ["Moonkin Form"] = 10,
+    ["Shred"] = 2, ["Claw"] = 1, ["Rake"] = 1, ["Rip"] = 1, ["Ferocious Bite"] = 1,
+    ["Maul"] = 1, ["Swipe"] = 1,
+    ["Lightning Bolt"] = 1, ["Chain Lightning"] = 2, ["Stormstrike"] = 3,
+    ["Seal of Command"] = 3, ["Crusader Strike"] = 2, ["Holy Strike"] = 2,
+}
+
+-- player's own spec from talents: which tabs count as healing
+-- talent trees per class (by name, so tab order doesn't matter); true = healing tree
+local CLASS_TREES = {
+    DRUID   = { ["Balance"] = false, ["Feral Combat"] = false, ["Restoration"] = true },
+    PRIEST  = { ["Discipline"] = true, ["Holy"] = true, ["Shadow"] = false },
+    SHAMAN  = { ["Elemental"] = false, ["Enhancement"] = false, ["Restoration"] = true },
+    PALADIN = { ["Holy"] = true, ["Protection"] = false, ["Retribution"] = false },
+}
+
+local INSPECT_INTERVAL = 2          -- seconds between inspect requests
+local INSPECT_TIMEOUT  = 4          -- give up waiting for talent data after this
+local INSPECT_RETRY    = 90         -- wait before retrying someone whose inspect failed
+local SPEC_REFRESH     = 30 * 60    -- re-inspect known specs after this (respecs)
+local SPEC_EXPIRE      = 14 * 24 * 3600
+
+local defaults = {
+    enabled      = true,
+    locked       = false,
+    maxRows      = 5,
+    showDPS      = false,
+    detectMode   = "BOTH",      -- BOTH, AUTO, MANUAL
+    useTalents   = true,        -- auto-detect by inspecting talents
+    useCombatLog = false,       -- auto-detect from combat log heals (fallback)
+    assumeHybrids = false,      -- treat undetected druids/shamans/paladins as healers
+    includeSelf  = true,
+    hideSolo     = true,
+    combatOnly   = false,
+    showHeader   = true,
+    clickCast    = true,
+    fadeAlpha    = 0.35,
+    threshold    = 100,         -- only list units at or below this mana %
+    scale        = 1,
+    width        = 150,
+    manual       = {},
+    detected     = {},
+    specs        = {},          -- name -> { class, h = heal pts, o = best other tree, pts = "a/b/c", t }
+    point       = { "CENTER", "CENTER", 250, 0 },
+}
+
+local db
+local driver = CreateFrame("Frame", "InnervateBuddyDriver", UIParent)
+local main, headerText, headerCD
+local rows = {}
+local roster, rosterByName = {}, {}
+local rosterDirty = true
+local display = {}
+local playerName
+local innervateSlot
+local selfHealer = true
+IB.testMode = false
+
+---------------------------------------------------------------------------
+-- helpers
+---------------------------------------------------------------------------
+function IB:Print(msg)
+    DEFAULT_CHAT_FRAME:AddMessage("|cffff7d0aInnervateBuddy|r: " .. tostring(msg))
+end
+
+local function CopyDefaults(src, dst)
+    for k, v in pairs(src) do
+        if type(v) == "table" then
+            if type(dst[k]) ~= "table" then
+                dst[k] = {}
+                CopyDefaults(v, dst[k])
+            end
+        elseif dst[k] == nil then
+            dst[k] = v
+        end
+    end
+end
+
+local function Normalize(name)
+    if not name then return nil end
+    name = string.gsub(name, "^%s+", "")
+    name = string.gsub(name, "%s+$", "")
+    if name == "" then return nil end
+    return string.upper(string.sub(name, 1, 1)) .. string.lower(string.sub(name, 2))
+end
+
+local function NotifyOptions()
+    if IB.Options_Refresh then IB:Options_Refresh() end
+end
+
+---------------------------------------------------------------------------
+-- manual healer list
+---------------------------------------------------------------------------
+function IB:AddManual(name)
+    if not name or name == "" then
+        if UnitExists("target") and UnitIsPlayer("target") then
+            name = UnitName("target")
+        else
+            self:Print("No name given and no player targeted.")
+            return
+        end
+    end
+    name = Normalize(name)
+    if not name then return end
+    db.manual[name] = true
+    self:Print(name .. " added to the healer list.")
+    self:Refresh()
+    NotifyOptions()
+end
+
+function IB:RemoveManual(name)
+    if not name or name == "" then
+        if UnitExists("target") and UnitIsPlayer("target") then name = UnitName("target") end
+    end
+    name = Normalize(name)
+    if not name then return end
+    if db.manual[name] then
+        db.manual[name] = nil
+        self:Print(name .. " removed from the healer list.")
+    else
+        self:Print(name .. " is not on the healer list.")
+    end
+    self:Refresh()
+    NotifyOptions()
+end
+
+function IB:ToggleManual(name)
+    if db.manual[name] then self:RemoveManual(name) else self:AddManual(name) end
+end
+
+function IB:GetManualList()
+    local t = {}
+    for name in pairs(db.manual) do table.insert(t, name) end
+    table.sort(t)
+    return t
+end
+
+function IB:ClearManual()
+    db.manual = {}
+    self:Print("Healer list cleared.")
+    self:Refresh()
+    NotifyOptions()
+end
+
+function IB:ClearDetected()
+    db.detected = {}
+    db.specs = {}
+    for i = 1, table.getn(roster) do roster[i].inspectFail = nil end
+    self:Print("Auto-detected roles reset (talents will be re-inspected).")
+    self:Refresh()
+    NotifyOptions()
+end
+
+---------------------------------------------------------------------------
+-- role logic
+---------------------------------------------------------------------------
+-- returns isHealer, reason
+function IB:GetRole(name, class)
+    local mode = db.detectMode
+    if mode ~= "AUTO" and db.manual[name] then return true, "manual" end
+    if mode == "MANUAL" then return false, nil end
+    if not IB.HEAL_CLASSES[class] then return false, nil end
+    if name == playerName then return selfHealer, "talents" end
+    if db.useTalents then
+        local s = db.specs[name]
+        if s and s.class == class then
+            return s.h >= s.o, "talents " .. s.pts
+        end
+    end
+    if db.useCombatLog then
+        local d = db.detected[name]
+        if d then
+            if d.h >= DETECT_MIN and d.h >= d.d then return true, "combat log" end
+            if d.d >= DETECT_MIN then return false, "combat log" end
+        end
+    end
+    if class == "PRIEST" or db.assumeHybrids then return true, "assumed" end
+    return false, nil
+end
+
+local function IsEligible(e)
+    local healer = IB:GetRole(e.name, e.class)
+    if healer then return true, true end
+    if db.showDPS and (IB.HEAL_CLASSES[e.class] or IB.DPS_MANA_CLASSES[e.class]) then
+        return true, false
+    end
+    return false, false
+end
+
+function IB:GetHealerSummary()
+    local t = {}
+    for i = 1, table.getn(roster) do
+        local e = roster[i]
+        local healer, reason = self:GetRole(e.name, e.class)
+        if healer then table.insert(t, { name = e.name, class = e.class, reason = reason }) end
+    end
+    table.sort(t, function(a, b) return a.name < b.name end)
+    return t
+end
+
+local function Record(name, spell)
+    if not name or not spell or not rosterByName[name] then return end
+    local kind, w
+    if IB.HEAL_SPELLS[spell] then
+        kind, w = "h", IB.HEAL_SPELLS[spell]
+    elseif IB.DPS_SPELLS[spell] then
+        kind, w = "d", IB.DPS_SPELLS[spell]
+    else
+        return
+    end
+    local d = db.detected[name]
+    if not d then
+        d = { h = 0, d = 0 }
+        db.detected[name] = d
+    end
+    d[kind] = d[kind] + w
+    if d[kind] > 40 then -- keep it biased toward recent behaviour (respecs)
+        d.h = math.floor(d.h / 2)
+        d.d = math.floor(d.d / 2)
+    end
+    d.t = time()
+end
+
+local PATTERNS = {
+    "^(.-) begins to cast (.+)%.$",
+    "^(.-) casts (.-) on ",
+    " from (.-)'s (.-)%.$",
+    "^(.-)'s (.-) critically heals ",
+    "^(.-)'s (.-) heals ",
+    "^(.-)'s (.-) crits ",
+    "^(.-)'s (.-) hits ",
+    "^(.-) gains (.-)%.$",
+}
+
+function IB:ParseCombat(msg)
+    if not msg or not db.useCombatLog or db.detectMode == "MANUAL" then return end
+    for i = 1, table.getn(PATTERNS) do
+        local _, _, who, spell = string.find(msg, PATTERNS[i])
+        if who then
+            Record(who, spell)
+            return
+        end
+    end
+end
+
+-- Reads talent tabs (own, or the inspected unit's when inspect is true).
+-- Returns heal points, best other tree, "a/b/c" string; nil if the tabs don't belong to class.
+local function ReadTalents(class, inspect)
+    local trees = CLASS_TREES[class]
+    if not trees then return nil end
+    local _
+    local heal, other, total, parts = 0, 0, 0, {}
+    for i = 1, 3 do
+        local tabName, pts
+        if inspect then
+            tabName, _, pts = GetTalentTabInfo(i, 1)
+        else
+            tabName, _, pts = GetTalentTabInfo(i)
+        end
+        if not tabName or trees[tabName] == nil then return nil end
+        pts = pts or 0
+        total = total + pts
+        if trees[tabName] then heal = heal + pts else other = math.max(other, pts) end
+        table.insert(parts, pts)
+    end
+    return heal, other, table.concat(parts, "/"), total
+end
+
+function IB:CheckSelfSpec()
+    local _, class = UnitClass("player")
+    local heal, other = ReadTalents(class, false)
+    selfHealer = heal ~= nil and heal >= other
+end
+
+---------------------------------------------------------------------------
+-- talent inspection queue (Turtle WoW / 1.18: inspect works at any range)
+---------------------------------------------------------------------------
+local pending          -- { name, unit, class, time }
+local nextInspect = 0
+local inspectSupported = nil   -- set true once INSPECT_TALENT_READY is seen
+
+local function NeedsInspect(e, now)
+    if not IB.HEAL_CLASSES[e.class] or e.name == playerName then return false end
+    if e.inspectFail and now - e.inspectFail < INSPECT_RETRY then return false end
+    local s = db.specs[e.name]
+    if s and s.class == e.class and time() - s.t < SPEC_REFRESH then return false end
+    return true
+end
+
+function IB:InspectTick()
+    if not db.useTalents or db.detectMode == "MANUAL" then return end
+    local now = GetTime()
+    if pending then
+        if now - pending.time > INSPECT_TIMEOUT then
+            local e = rosterByName[pending.name]
+            if e then e.inspectFail = now end
+            pending = nil
+        end
+        return
+    end
+    if now < nextInspect then return end
+    if UnitAffectingCombat("player") then return end
+    if InspectFrame and InspectFrame:IsVisible() then return end -- don't hijack the player's inspect
+    for i = 1, table.getn(roster) do
+        local e = roster[i]
+        if NeedsInspect(e, now) and UnitIsConnected(e.unit) and UnitName(e.unit) == e.name then
+            pending = { name = e.name, unit = e.unit, class = e.class, time = now }
+            nextInspect = now + INSPECT_INTERVAL
+            NotifyInspect(e.unit)
+            return
+        end
+    end
+end
+
+function IB:OnInspectTalentReady()
+    inspectSupported = true
+    if not pending then return end
+    local p = pending
+    pending = nil
+    local e = rosterByName[p.name]
+    local heal, other, pts, total = ReadTalents(p.class, true)
+    -- tab names must match their class and someone level 10+ has points spent
+    if not heal or total == 0 then
+        if e then e.inspectFail = GetTime() end
+        return
+    end
+    db.specs[p.name] = { class = p.class, h = heal, o = other, pts = pts, t = time() }
+    if e then e.inspectFail = nil end
+    NotifyOptions()
+end
+
+function IB:InspectStatus()
+    local known, total = 0, 0
+    for i = 1, table.getn(roster) do
+        local e = roster[i]
+        if IB.HEAL_CLASSES[e.class] and e.name ~= playerName then
+            total = total + 1
+            local s = db.specs[e.name]
+            if s and s.class == e.class then known = known + 1 end
+        end
+    end
+    return known, total, inspectSupported
+end
+
+function IB:PrintSpecs()
+    local known, total, ok = self:InspectStatus()
+    self:Print(string.format("Talent specs known for %d/%d healing-class group members.", known, total))
+    if ok == nil and total > 0 then
+        DEFAULT_CHAT_FRAME:AddMessage("  |cff999999No talent inspect reply seen yet this session.|r")
+    end
+    for i = 1, table.getn(roster) do
+        local e = roster[i]
+        local s = db.specs[e.name]
+        if IB.HEAL_CLASSES[e.class] and s and s.class == e.class then
+            DEFAULT_CHAT_FRAME:AddMessage(string.format("  %s (%s): %s - %s", e.name, string.lower(e.class),
+                s.pts, s.h >= s.o and "|cff4cff66healer|r" or "|cffff6666dps|r"))
+        end
+    end
+end
+
+---------------------------------------------------------------------------
+-- roster / range / innervate
+---------------------------------------------------------------------------
+local function AddUnit(unit)
+    if not UnitExists(unit) then return end
+    local name = UnitName(unit)
+    if not name or name == UNKNOWNOBJECT then return end
+    local _, class = UnitClass(unit)
+    local e = { unit = unit, name = name, class = class }
+    table.insert(roster, e)
+    rosterByName[name] = e
+end
+
+function IB:BuildRoster()
+    rosterDirty = false
+    local old = rosterByName
+    roster, rosterByName = {}, {}
+    local n = GetNumRaidMembers()
+    if n > 0 then
+        for i = 1, n do AddUnit("raid" .. i) end
+    else
+        AddUnit("player")
+        for i = 1, GetNumPartyMembers() do AddUnit("party" .. i) end
+    end
+    -- carry over last known mana (druids in forms)
+    for name, e in pairs(rosterByName) do
+        if old[name] then
+            e.lastPct = old[name].lastPct
+            e.inspectFail = old[name].inspectFail
+        end
+    end
+    NotifyOptions()
+end
+
+function IB:GetDistance(unit)
+    if UnitXP then
+        local ok, d = pcall(UnitXP, "distanceBetween", "player", unit)
+        if ok and type(d) == "number" then return d end
+    end
+    return nil
+end
+
+function IB:InRange(unit)
+    if UnitIsUnit(unit, "player") then return true end
+    if not UnitIsVisible(unit) then return false end
+    local d = self:GetDistance(unit)
+    if d then return d <= INNERVATE_RANGE end
+    return CheckInteractDistance(unit, 4) and true or false -- ~28 yards
+end
+
+function IB:FindInnervate()
+    innervateSlot = nil
+    local i = 1
+    while true do
+        local n = GetSpellName(i, "spell")
+        if not n then break end
+        if n == INNERVATE then innervateSlot = i end
+        i = i + 1
+    end
+end
+
+function IB:CastOn(unit)
+    if not innervateSlot then
+        self:Print("You don't know Innervate.")
+        return
+    end
+    if SUPERWOW_VERSION then
+        CastSpellByName(INNERVATE, unit)
+        return
+    end
+    if UnitIsUnit(unit, "player") then
+        CastSpellByName(INNERVATE, 1)
+        return
+    end
+    if UnitIsUnit(unit, "target") then
+        CastSpellByName(INNERVATE)
+        return
+    end
+    local hadTarget = UnitExists("target")
+    TargetUnit(unit)
+    CastSpellByName(INNERVATE)
+    if SpellIsTargeting() then SpellTargetUnit(unit) end
+    if hadTarget then TargetLastTarget() else ClearTarget() end
+end
+
+---------------------------------------------------------------------------
+-- display
+---------------------------------------------------------------------------
+local TEST_DATA = {
+    { "Lightwell", "PRIEST", 0.12 }, { "Treehugger", "DRUID", 0.27 },
+    { "Totemic", "SHAMAN", 0.41 }, { "Bubbles", "PALADIN", 0.58 },
+    { "Frostbolt", "MAGE", 0.66 }, { "Lifetap", "WARLOCK", 0.08 },
+    { "Aimshot", "HUNTER", 0.73 }, { "Holyshock", "PALADIN", 0.89 },
+    { "Sunbeam", "PRIEST", 0.95 },
+}
+local testEntries = {}
+for i = 1, table.getn(TEST_DATA) do
+    local t = TEST_DATA[i]
+    testEntries[i] = { name = t[1], class = t[2], pct = t[3], healer = IB.HEAL_CLASSES[t[2]],
+                       inRange = math.mod(i, 3) ~= 0, test = true }
+end
+
+local function SortFn(a, b)
+    if a.pct ~= b.pct then return a.pct < b.pct end
+    return a.name < b.name
+end
+
+local function SetFont(fs, size)
+    fs:SetFont(FONT, size)
+    fs:SetShadowColor(0, 0, 0, 1)
+    fs:SetShadowOffset(1, -1)
+end
+
+local function Row_OnEnter()
+    local e = this.entry
+    if not e then return end
+    GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+    local c = IB.CLASS_COLORS[e.class] or { r = 1, g = 1, b = 1 }
+    GameTooltip:AddLine(e.name, c.r, c.g, c.b)
+    if e.unit and UnitExists(e.unit) then
+        GameTooltip:AddDoubleLine("Mana", UnitMana(e.unit) .. " / " .. UnitManaMax(e.unit), .7, .7, .7, 1, 1, 1)
+        local d = IB:GetDistance(e.unit)
+        if d then GameTooltip:AddDoubleLine("Distance", string.format("%.0f yd", d), .7, .7, .7, 1, 1, 1) end
+    end
+    if e.form then GameTooltip:AddLine("In shapeshift form - last known mana", .6, .6, .6) end
+    if not e.inRange then GameTooltip:AddLine("Out of Innervate range", 1, .3, .3) end
+    if not e.test then
+        local healer, reason = IB:GetRole(e.name, e.class)
+        GameTooltip:AddDoubleLine("Role", healer and ("Healer (" .. reason .. ")") or "DPS", .7, .7, .7, 1, 1, 1)
+    end
+    GameTooltip:AddLine(" ")
+    if db.clickCast then GameTooltip:AddLine("Left-click: cast Innervate", .5, .8, 1) end
+    GameTooltip:AddLine("Right-click: target", .5, .8, 1)
+    GameTooltip:AddLine("Shift-right-click: toggle healer list", .5, .8, 1)
+    GameTooltip:Show()
+end
+
+local function Row_OnClick()
+    local e = this.entry
+    if not e or e.test then return end
+    if arg1 == "LeftButton" then
+        if db.clickCast then IB:CastOn(e.unit) else TargetUnit(e.unit) end
+    elseif arg1 == "RightButton" then
+        if IsShiftKeyDown() then IB:ToggleManual(e.name) else TargetUnit(e.unit) end
+    end
+end
+
+local function StartDrag()
+    if not db.locked then main:StartMoving() end
+end
+
+local function StopDrag()
+    main:StopMovingOrSizing()
+    local p, _, rp, x, y = main:GetPoint()
+    db.point = { p, rp, x, y }
+end
+
+local function CreateRow(i)
+    local b = CreateFrame("Button", "InnervateBuddyRow" .. i, main)
+    b:SetHeight(ROW_H)
+    b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    b:RegisterForDrag("LeftButton")
+    b:SetScript("OnDragStart", StartDrag)
+    b:SetScript("OnDragStop", StopDrag)
+    b:SetScript("OnClick", Row_OnClick)
+    b:SetScript("OnEnter", Row_OnEnter)
+    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    b.bg = b:CreateTexture(nil, "BACKGROUND")
+    b.bg:SetAllPoints(b)
+    b.bg:SetTexture(TEX)
+
+    b.bar = CreateFrame("StatusBar", nil, b)
+    b.bar:SetAllPoints(b)
+    b.bar:SetStatusBarTexture(TEX)
+    b.bar:SetMinMaxValues(0, 1)
+
+    b.role = b.bar:CreateTexture(nil, "OVERLAY")
+    b.role:SetTexture(TEX)
+    b.role:SetVertexColor(0.3, 1, 0.4, 1)
+    b.role:SetWidth(2)
+    b.role:SetPoint("TOPLEFT", b, "TOPLEFT", 0, 0)
+    b.role:SetPoint("BOTTOMLEFT", b, "BOTTOMLEFT", 0, 0)
+
+    b.pct = b.bar:CreateFontString(nil, "OVERLAY")
+    SetFont(b.pct, 10)
+    b.pct:SetPoint("RIGHT", b, "RIGHT", -3, 0)
+    b.pct:SetJustifyH("RIGHT")
+
+    b.name = b.bar:CreateFontString(nil, "OVERLAY")
+    SetFont(b.name, 10)
+    b.name:SetPoint("LEFT", b, "LEFT", 5, 0)
+    b.name:SetPoint("RIGHT", b.pct, "LEFT", -2, 0)
+    b.name:SetHeight(ROW_H)
+    b.name:SetJustifyH("LEFT")
+
+    rows[i] = b
+    return b
+end
+
+local function CreateMain()
+    main = CreateFrame("Frame", "InnervateBuddyFrame", UIParent)
+    main:SetFrameStrata("MEDIUM")
+    main:SetMovable(true)
+    main:SetClampedToScreen(true)
+    main:EnableMouse(true)
+    main:RegisterForDrag("LeftButton")
+    main:SetScript("OnDragStart", StartDrag)
+    main:SetScript("OnDragStop", StopDrag)
+    main:SetBackdrop({
+        bgFile = TEX, edgeFile = TEX, edgeSize = 1,
+        insets = { left = 1, right = 1, top = 1, bottom = 1 },
+    })
+    main:SetBackdropColor(0, 0, 0, 0.55)
+    main:SetBackdropBorderColor(0, 0, 0, 0.9)
+
+    headerText = main:CreateFontString(nil, "OVERLAY")
+    SetFont(headerText, 10)
+    headerText:SetPoint("TOPLEFT", main, "TOPLEFT", PAD + 3, -PAD - 2)
+    headerText:SetTextColor(1, 0.49, 0.04)
+    headerText:SetText("Innervate")
+
+    headerCD = main:CreateFontString(nil, "OVERLAY")
+    SetFont(headerCD, 10)
+    headerCD:SetPoint("TOPRIGHT", main, "TOPRIGHT", -PAD - 3, -PAD - 2)
+end
+
+function IB:ApplySettings()
+    if not main then return end
+    main:SetScale(db.scale)
+    main:SetWidth(db.width)
+    main:ClearAllPoints()
+    local p = db.point
+    main:SetPoint(p[1], UIParent, p[2], p[3], p[4])
+    self:Refresh()
+end
+
+function IB:ResetPosition()
+    db.point = { "CENTER", "CENTER", 250, 0 }
+    self:ApplySettings()
+end
+
+local function UpdateCooldown()
+    if not innervateSlot then
+        headerCD:SetText("")
+        return
+    end
+    local start, duration = GetSpellCooldown(innervateSlot, "spell")
+    local remain = (start or 0) + (duration or 0) - GetTime()
+    if start and start > 0 and duration > 1.5 and remain > 0 then
+        local m = math.floor(remain / 60)
+        local s = math.floor(math.mod(remain, 60))
+        headerCD:SetText(string.format("%d:%02d", m, s))
+        headerCD:SetTextColor(0.8, 0.8, 0.8)
+    else
+        headerCD:SetText("Ready")
+        headerCD:SetTextColor(0.3, 1, 0.4)
+    end
+end
+
+function IB:Refresh()
+    if not main or not db then return end
+    if rosterDirty then self:BuildRoster() end
+
+    -- visibility
+    local inGroup = GetNumRaidMembers() > 0 or GetNumPartyMembers() > 0
+    local show = db.enabled
+    if show and db.locked and not self.testMode then
+        if db.hideSolo and not inGroup then show = false end
+        if db.combatOnly and not UnitAffectingCombat("player") then show = false end
+    end
+    if not show then
+        main:Hide()
+        return
+    end
+
+    -- collect
+    for i = table.getn(display), 1, -1 do table.remove(display, i) end
+    if self.testMode then
+        for i = 1, table.getn(testEntries) do
+            local e = testEntries[i]
+            if (e.healer or db.showDPS) and e.pct * 100 <= db.threshold then
+                table.insert(display, e)
+            end
+        end
+    else
+        for i = 1, table.getn(roster) do
+            local e = roster[i]
+            local u = e.unit
+            if UnitExists(u) and UnitIsConnected(u) and not UnitIsDeadOrGhost(u)
+               and (db.includeSelf or not UnitIsUnit(u, "player")) then
+                if not e.class then local _, c = UnitClass(u); e.class = c end
+                local ok, healer = IsEligible(e)
+                if ok then
+                    local pct
+                    if UnitPowerType(u) == 0 then
+                        local max = UnitManaMax(u)
+                        if max and max > 0 then
+                            pct = UnitMana(u) / max
+                            e.lastPct = pct
+                        end
+                        e.form = nil
+                    else
+                        pct = e.lastPct
+                        e.form = true
+                    end
+                    if pct and pct * 100 <= db.threshold then
+                        e.pct = pct
+                        e.healer = healer
+                        e.inRange = self:InRange(u)
+                        table.insert(display, e)
+                    end
+                end
+            end
+        end
+    end
+    table.sort(display, SortFn)
+
+    -- layout
+    local count = math.min(table.getn(display), db.maxRows)
+    local showHeader = db.showHeader or not db.locked
+    local y = -PAD
+    if showHeader then
+        headerText:Show()
+        headerCD:Show()
+        headerText:SetText(db.locked and "Innervate" or "Innervate |cff888888(unlocked)|r")
+        UpdateCooldown()
+        y = y - HEADER_H - ROW_GAP
+    else
+        headerText:Hide()
+        headerCD:Hide()
+    end
+
+    for i = 1, count do
+        local e = display[i]
+        local r = rows[i] or CreateRow(i)
+        r:ClearAllPoints()
+        r:SetPoint("TOPLEFT", main, "TOPLEFT", PAD, y)
+        r:SetPoint("TOPRIGHT", main, "TOPRIGHT", -PAD, y)
+        y = y - ROW_H - ROW_GAP
+        r.entry = e
+
+        local c = IB.CLASS_COLORS[e.class] or { r = .6, g = .6, b = .6 }
+        r.bar:SetStatusBarColor(c.r * 0.8, c.g * 0.8, c.b * 0.8, 0.85)
+        r.bg:SetVertexColor(c.r * 0.18, c.g * 0.18, c.b * 0.18, 0.9)
+        r.bar:SetValue(e.pct)
+        r.name:SetText(e.name)
+
+        local p = math.floor(e.pct * 100 + 0.5)
+        if e.form then
+            r.pct:SetText("~" .. p .. "%")
+            r.pct:SetTextColor(0.6, 0.6, 0.6)
+        elseif p < 20 then
+            r.pct:SetText(p .. "%"); r.pct:SetTextColor(1, 0.3, 0.3)
+        elseif p < 40 then
+            r.pct:SetText(p .. "%"); r.pct:SetTextColor(1, 0.75, 0.3)
+        else
+            r.pct:SetText(p .. "%"); r.pct:SetTextColor(1, 1, 1)
+        end
+
+        if db.showDPS and e.healer then r.role:Show() else r.role:Hide() end
+        r:SetAlpha(e.inRange and 1 or db.fadeAlpha)
+        r:Show()
+    end
+    for i = count + 1, table.getn(rows) do
+        rows[i].entry = nil
+        rows[i]:Hide()
+    end
+
+    if count == 0 and not showHeader then
+        main:Hide()
+        return
+    end
+    local h = -y + PAD - ROW_GAP
+    if count == 0 then h = PAD * 2 + HEADER_H end
+    main:SetHeight(h)
+    main:Show()
+end
+
+---------------------------------------------------------------------------
+-- events
+---------------------------------------------------------------------------
+local COMBAT_EVENTS = {
+    "CHAT_MSG_SPELL_FRIENDLYPLAYER_BUFF", "CHAT_MSG_SPELL_PARTY_BUFF",
+    "CHAT_MSG_SPELL_PERIODIC_FRIENDLYPLAYER_BUFFS", "CHAT_MSG_SPELL_PERIODIC_PARTY_BUFFS",
+    "CHAT_MSG_SPELL_PERIODIC_SELF_BUFFS",
+    "CHAT_MSG_SPELL_FRIENDLYPLAYER_DAMAGE", "CHAT_MSG_SPELL_PARTY_DAMAGE",
+    "CHAT_MSG_SPELL_PERIODIC_CREATURE_DAMAGE", "CHAT_MSG_SPELL_PERIODIC_HOSTILEPLAYER_DAMAGE",
+}
+local isCombatEvent = {}
+for i = 1, table.getn(COMBAT_EVENTS) do isCombatEvent[COMBAT_EVENTS[i]] = true end
+
+local function OnLoad()
+    InnervateBuddyDB = InnervateBuddyDB or {}
+    db = InnervateBuddyDB
+    CopyDefaults(defaults, db)
+    IB.db = db
+    local now = time()
+    for name, d in pairs(db.detected) do
+        if type(d) ~= "table" or not d.t or now - d.t > DETECT_EXPIRE then db.detected[name] = nil end
+    end
+    for name, s in pairs(db.specs) do
+        if type(s) ~= "table" or not s.t or now - s.t > SPEC_EXPIRE then db.specs[name] = nil end
+    end
+    playerName = UnitName("player")
+    CreateMain()
+    IB:ApplySettings()
+    local _, class = UnitClass("player")
+    if class ~= "DRUID" then
+        IB:Print("You are not a Druid - Innervate casting is disabled, but the list still works.")
+    end
+end
+
+driver:RegisterEvent("ADDON_LOADED")
+driver:RegisterEvent("PLAYER_ENTERING_WORLD")
+driver:RegisterEvent("RAID_ROSTER_UPDATE")
+driver:RegisterEvent("PARTY_MEMBERS_CHANGED")
+driver:RegisterEvent("SPELLS_CHANGED")
+driver:RegisterEvent("LEARNED_SPELL_IN_TAB")
+driver:RegisterEvent("CHARACTER_POINTS_CHANGED")
+if SUPERWOW_VERSION then driver:RegisterEvent("UNIT_CASTEVENT") end
+pcall(driver.RegisterEvent, driver, "INSPECT_TALENT_READY")
+for i = 1, table.getn(COMBAT_EVENTS) do driver:RegisterEvent(COMBAT_EVENTS[i]) end
+
+driver:SetScript("OnEvent", function()
+    if event == "ADDON_LOADED" then
+        if arg1 == "InnervateBuddy" then OnLoad() end
+        return
+    end
+    if not db then return end
+    if isCombatEvent[event] then
+        IB:ParseCombat(arg1)
+    elseif event == "INSPECT_TALENT_READY" then
+        IB:OnInspectTalentReady()
+    elseif event == "UNIT_CASTEVENT" then
+        if (arg3 == "CAST" or arg3 == "CHANNEL") and SpellInfo and db.useCombatLog and db.detectMode ~= "MANUAL" then
+            local ok, name = pcall(UnitName, arg1)
+            local spell = SpellInfo(arg4)
+            if ok then Record(name, spell) end
+        end
+    elseif event == "PLAYER_ENTERING_WORLD" then
+        playerName = UnitName("player")
+        rosterDirty = true
+        IB:FindInnervate()
+        IB:CheckSelfSpec()
+    elseif event == "RAID_ROSTER_UPDATE" or event == "PARTY_MEMBERS_CHANGED" then
+        rosterDirty = true
+    elseif event == "SPELLS_CHANGED" or event == "LEARNED_SPELL_IN_TAB" then
+        IB:FindInnervate()
+    elseif event == "CHARACTER_POINTS_CHANGED" then
+        IB:CheckSelfSpec()
+    end
+end)
+
+local elapsed = 0
+driver:SetScript("OnUpdate", function()
+    elapsed = elapsed + arg1
+    if elapsed < UPDATE_RATE then return end
+    elapsed = 0
+    IB:Refresh()
+    IB:InspectTick()
+end)
+
+---------------------------------------------------------------------------
+-- slash commands
+---------------------------------------------------------------------------
+local function Help()
+    IB:Print("v" .. IB.version .. " commands (/ib or /innervatebuddy):")
+    local c = "|cffffd100"
+    DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib|r - open options")
+    DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib lock|unlock|r - lock or unlock the frame")
+    DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib dps|r - toggle showing DPS mana classes")
+    DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib rows <n>|r - number of units shown")
+    DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib mode auto|manual|both|r - healer detection mode")
+    DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib add|remove [name]|r - edit healer list (no name = target)")
+    DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib list|r, |cffffd100/ib clear|r - show / clear healer list")
+    DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib talents [on|off]|r - detect healers by inspecting talents (default on)")
+    DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib combatlog [on|off]|r - detect healers from combat log heals (default off)")
+    DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib specs|r - show inspected talent specs in your group")
+    DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib rescan|r - forget detected roles and re-inspect")
+    DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib test|r - toggle preview with fake data")
+    DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib toggle|r - enable / disable the frame")
+    DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib reset|r - reset frame position")
+end
+
+local MODE_NAMES = { BOTH = "auto + manual", AUTO = "auto only", MANUAL = "manual only" }
+IB.MODE_NAMES = MODE_NAMES
+
+SLASH_INNERVATEBUDDY1 = "/ib"
+SLASH_INNERVATEBUDDY2 = "/innervatebuddy"
+SlashCmdList["INNERVATEBUDDY"] = function(msg)
+    if not db then return end
+    local _, _, cmd, rest = string.find(msg or "", "^%s*(%S*)%s*(.-)%s*$")
+    cmd = string.lower(cmd or "")
+    if cmd == "" or cmd == "config" or cmd == "options" then
+        IB:ToggleOptions()
+    elseif cmd == "help" then
+        Help()
+    elseif cmd == "lock" then
+        db.locked = true; IB:Print("Frame locked."); IB:Refresh(); NotifyOptions()
+    elseif cmd == "unlock" then
+        db.locked = false; IB:Print("Frame unlocked - drag to move."); IB:Refresh(); NotifyOptions()
+    elseif cmd == "dps" then
+        db.showDPS = not db.showDPS
+        IB:Print("DPS mana classes " .. (db.showDPS and "shown." or "hidden."))
+        IB:Refresh(); NotifyOptions()
+    elseif cmd == "rows" then
+        local n = tonumber(rest)
+        if n and n >= 1 and n <= 40 then
+            db.maxRows = math.floor(n); IB:Print("Showing up to " .. db.maxRows .. " units.")
+            IB:Refresh(); NotifyOptions()
+        else
+            IB:Print("Usage: /ib rows <1-40>")
+        end
+    elseif cmd == "mode" then
+        local m = string.upper(rest or "")
+        if MODE_NAMES[m] then
+            db.detectMode = m; IB:Print("Healer detection: " .. MODE_NAMES[m] .. ".")
+            IB:Refresh(); NotifyOptions()
+        else
+            IB:Print("Usage: /ib mode auto|manual|both")
+        end
+    elseif cmd == "add" then
+        IB:AddManual(rest)
+    elseif cmd == "remove" or cmd == "del" then
+        IB:RemoveManual(rest)
+    elseif cmd == "list" then
+        local t = IB:GetManualList()
+        if table.getn(t) == 0 then IB:Print("Healer list is empty.")
+        else IB:Print("Healer list: " .. table.concat(t, ", ")) end
+    elseif cmd == "clear" then
+        IB:ClearManual()
+    elseif cmd == "resetdetect" or cmd == "rescan" then
+        IB:ClearDetected()
+    elseif cmd == "talents" or cmd == "combatlog" then
+        local key = (cmd == "talents") and "useTalents" or "useCombatLog"
+        local v = string.lower(rest or "")
+        if v == "on" then db[key] = true elseif v == "off" then db[key] = false else db[key] = not db[key] end
+        IB:Print((cmd == "talents" and "Talent inspect" or "Combat log") .. " detection " .. (db[key] and "on." or "off."))
+        IB:Refresh(); NotifyOptions()
+    elseif cmd == "specs" then
+        IB:PrintSpecs()
+    elseif cmd == "test" then
+        IB.testMode = not IB.testMode
+        IB:Print("Test mode " .. (IB.testMode and "on." or "off."))
+        IB:Refresh(); NotifyOptions()
+    elseif cmd == "toggle" then
+        db.enabled = not db.enabled
+        IB:Print(db.enabled and "Enabled." or "Disabled.")
+        IB:Refresh(); NotifyOptions()
+    elseif cmd == "reset" then
+        IB:ResetPosition(); IB:Print("Position reset.")
+    else
+        Help()
+    end
+end
