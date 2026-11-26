@@ -86,35 +86,41 @@ local function Button(text, w, x, y, onClick)
     return b
 end
 
+-- layout grid for the lower section: two 192px columns
+local COL_L, COL_R, COL_W = 16, 232, 192
+local ROW_STEP = 15
+
 local function ListRow(x, y, withRemove)
     local r = CreateFrame("Frame", nil, opt)
-    r:SetWidth(190)
-    r:SetHeight(14)
+    r:SetWidth(COL_W)
+    r:SetHeight(ROW_STEP)
     r:SetPoint("TOPLEFT", opt, "TOPLEFT", x, y)
     r.text = Label(r, "")
-    r.text:SetPoint("LEFT", r, "LEFT", 4, 0)
+    r.text:SetPoint("LEFT", r, "LEFT", 6, 0)
     if withRemove then
         local rb = CreateFrame("Button", nil, r)
-        rb:SetWidth(14)
-        rb:SetHeight(14)
+        rb:SetWidth(16)
+        rb:SetHeight(ROW_STEP)
         rb:SetPoint("RIGHT", r, "RIGHT", -2, 0)
         local fs = rb:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        fs:SetAllPoints(rb)
+        fs:SetPoint("CENTER", rb, "CENTER", 0, 1)
         fs:SetText("x")
         fs:SetTextColor(1, 0.3, 0.3)
         rb:SetScript("OnClick", function() if r.value then IB:RemoveManual(r.value) end end)
+        rb:SetScript("OnEnter", function() fs:SetTextColor(1, 0.6, 0.6) end)
+        rb:SetScript("OnLeave", function() fs:SetTextColor(1, 0.3, 0.3) end)
         r.remove = rb
     end
     return r
 end
 
 local function ListBackground(x, y, h)
-    local bg = opt:CreateTexture(nil, "BACKGROUND")
+    local bg = opt:CreateTexture(nil, "BORDER")
     bg:SetTexture(TEX)
-    bg:SetVertexColor(0, 0, 0, 0.35)
-    bg:SetWidth(194)
+    bg:SetVertexColor(1, 1, 1, 0.05)
+    bg:SetWidth(COL_W)
     bg:SetHeight(h)
-    bg:SetPoint("TOPLEFT", opt, "TOPLEFT", x - 2, y + 2)
+    bg:SetPoint("TOPLEFT", opt, "TOPLEFT", x, y)
 end
 
 local function pctFmt(v) return math.floor(v * 100 + 0.5) .. "%" end
@@ -124,7 +130,7 @@ local function scaleFmt(v) return string.format("%.2f", v) end
 local function CreateOptions()
     opt = CreateFrame("Frame", "InnervateBuddyOptions", UIParent)
     opt:SetWidth(440)
-    opt:SetHeight(538)
+    opt:SetHeight(556)
     opt:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
     opt:SetFrameStrata("DIALOG")
     opt:SetMovable(true)
@@ -169,7 +175,7 @@ local function CreateOptions()
 
     -- healers section
     Divider(opt, -280, "Healers")
-    modeButton = Button("", 200, 16, -290, function()
+    modeButton = Button("", COL_W, COL_L, -290, function()
         local cur = IB.db.detectMode
         for i = 1, 3 do
             if MODE_ORDER[i] == cur then
@@ -180,20 +186,27 @@ local function CreateOptions()
         IB:Refresh()
         IB:Options_Refresh()
     end)
-    Button("Reset detected", 100, 226, -290, function() IB:ClearDetected() end)
-    testButton = Button("Test", 80, 334, -290, function()
+    Button("Reset detected", 110, COL_R, -290, function() IB:ClearDetected() end)
+    testButton = Button("Test", COL_W - 114, COL_R + 114, -290, function()
         IB.testMode = not IB.testMode
         IB:Refresh()
         IB:Options_Refresh()
     end)
 
-    CheckBox("useTalents", "Inspect talents", "Auto-detect healers by inspecting group members' talent specs (Turtle WoW / 1.18 allows inspecting at any range). One request every 2s, paused in combat and while your Inspect window is open.", 16, -316)
-    CheckBox("useCombatLog", "Use combat log", "Fallback: auto-detect healers from heals and DPS spells seen in the combat log. Useful if talent inspect doesn't work.", 230, -316)
+    CheckBox("useTalents", "Inspect talents", "Auto-detect healers by inspecting group members' talent specs (Turtle WoW / 1.18 allows inspecting at any range). One request every 2s, paused in combat and while your Inspect window is open.", COL_L, -318)
+    CheckBox("useCombatLog", "Use combat log", "Fallback: auto-detect healers from heals and DPS spells seen in the combat log. Useful if talent inspect doesn't work.", COL_R, -318)
 
+    -- column headers
+    local l1 = Label(opt, "|cffaaaaaaManual list|r")
+    l1:SetPoint("TOPLEFT", opt, "TOPLEFT", COL_L + 2, -352)
+    local l2 = Label(opt, "|cffaaaaaaHealers in group now|r")
+    l2:SetPoint("TOPLEFT", opt, "TOPLEFT", COL_R + 2, -352)
+
+    -- add row (left) / inspect status (right), same baseline
     local eb = CreateFrame("EditBox", "InnervateBuddyOptInput", opt, "InputBoxTemplate")
-    eb:SetWidth(100)
+    eb:SetWidth(92)   -- template caps draw 5px outside the box
     eb:SetHeight(20)
-    eb:SetPoint("TOPLEFT", opt, "TOPLEFT", 22, -374)
+    eb:SetPoint("TOPLEFT", opt, "TOPLEFT", COL_L + 6, -368)
     eb:SetAutoFocus(false)
     eb:SetMaxLetters(24)
     local function addFromBox()
@@ -204,29 +217,27 @@ local function CreateOptions()
     end
     eb:SetScript("OnEnterPressed", addFromBox)
     eb:SetScript("OnEscapePressed", function() this:ClearFocus() end)
-    Button("Add", 40, 126, -374, addFromBox)
-    Button("Target", 50, 168, -374, function() IB:AddManual(nil) end)
+    Button("Add", 44, COL_L + 102, -368, addFromBox)
+    Button("Target", COL_W - 148, COL_L + 148, -368, function() IB:AddManual(nil) end)
 
-    local l1 = Label(opt, "|cffaaaaaaManual list|r")
-    l1:SetPoint("TOPLEFT", opt, "TOPLEFT", 18, -374)
-    local l2 = Label(opt, "|cffaaaaaaHealers in group now|r")
-    l2:SetPoint("TOPLEFT", opt, "TOPLEFT", 232, -374)
     specStatus = Label(opt, "")
-    specStatus:SetPoint("TOPLEFT", opt, "TOPLEFT", 232, -350)
-    specStatus:SetWidth(190)
+    specStatus:SetPoint("LEFT", opt, "TOPLEFT", COL_R + 2, -378)
+    specStatus:SetWidth(COL_W)
 
-    ListBackground(16, -388, LIST_ROWS * 15 + 4)
-    ListBackground(230, -388, LIST_ROWS * 15 + 4)
+    -- lists
+    local listTop, listH = -396, LIST_ROWS * ROW_STEP + 6
+    ListBackground(COL_L, listTop, listH)
+    ListBackground(COL_R, listTop, listH)
     for i = 1, LIST_ROWS do
-        manualRows[i] = ListRow(16, -390 - (i - 1) * 15, true)
-        healerRows[i] = ListRow(230, -390 - (i - 1) * 15, false)
+        manualRows[i] = ListRow(COL_L, listTop - 3 - (i - 1) * ROW_STEP, true)
+        healerRows[i] = ListRow(COL_R, listTop - 3 - (i - 1) * ROW_STEP, false)
     end
 
     -- mouse wheel scrolls the manual list
     local wheel = CreateFrame("Frame", nil, opt)
-    wheel:SetPoint("TOPLEFT", opt, "TOPLEFT", 14, -388)
-    wheel:SetWidth(194)
-    wheel:SetHeight(LIST_ROWS * 15 + 4)
+    wheel:SetPoint("TOPLEFT", opt, "TOPLEFT", COL_L, listTop)
+    wheel:SetWidth(COL_W)
+    wheel:SetHeight(listH)
     wheel:EnableMouseWheel(true)
     wheel:SetScript("OnMouseWheel", function()
         manualOffset = manualOffset - arg1

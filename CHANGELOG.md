@@ -3,6 +3,11 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- Options window: "Manual list" label overlapped the name box, the remove "x" sat off its row, and the inspect status floated. The Healers section now lines up on a two-column grid.
+
 ## [1.1.0] - 2026-11-26
 
 ### Added
