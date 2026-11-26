@@ -53,7 +53,9 @@ Each row shows the player's name in a class-coloured mana bar with their mana %.
 | `/ib list` / `/ib clear` | Show / clear the manual list |
 | `/ib talents [on\|off]` | Detect healers by inspecting talents (default **on**) |
 | `/ib combatlog [on\|off]` | Detect healers from the combat log (default **off**) |
-| `/ib specs` | Show the inspected talent specs in your group |
+| `/ib specs` | Show each healer's inspected spec, or whether they haven't answered |
+| `/ib inspect [name]` | Ask one player for their talents now (no name = your target) |
+| `/ib debug` | Print talent requests and replies to chat (troubleshooting) |
 | `/ib rescan` | Forget detected roles and re-inspect everyone |
 | `/ib test` | Toggle preview mode with fake data |
 | `/ib toggle` | Enable / disable the frame |
@@ -70,7 +72,7 @@ The detection mode decides which sources are used:
 
 Automatic detection, in order:
 
-1. **Talents (default).** Healing-class group members are inspected one at a time (every 2 s, paused in combat and while your own Inspect window is open). A player counts as a healer if they have at least as many points in healing trees as in their largest other tree:
+1. **Talents (default).** Healing-class group members are asked for their talents one at a time (every 3 s, paused in combat and while your own Inspect window is open). This uses the same hidden request Turtle WoW's own *Inspect → Talents* tab sends, so it works at any range and the other player doesn't need this addon. Players whose client doesn't answer within 10 s are retried after 90 s; turn on combat log detection to cover them. A player counts as a healer if they have at least as many points in healing trees as in their largest other tree:
    - Druid: Restoration · Priest: Discipline + Holy · Shaman: Restoration · Paladin: Holy
 
    Specs are saved between sessions, refreshed every 30 minutes, and forgotten after 14 days. Your own spec is read directly from your talents.
@@ -89,7 +91,7 @@ Open with `/ib`.
 ## Compatibility
 
 - Built for the **1.12 client** (Interface `11200`), targeting **Turtle WoW** and 1.18-based servers.
-- Talent-inspect detection needs a server/client that supports inspecting talents (Turtle WoW does). On a plain 1.12 client, use the manual list or turn on combat log detection.
+- Talent detection uses Turtle WoW's talent-inspect messages. On other 1.12 servers, use the manual list or turn on combat log detection.
 - Optional enhancements:
   - **[SuperWoW](https://github.com/balakethelock/SuperWoW)** — casts Innervate on the player without changing your target, and adds cast events to combat log detection.
   - **UnitXP_SP3** — exact distance for the range fade. Without it, the ~28 yd interact-distance check is used.

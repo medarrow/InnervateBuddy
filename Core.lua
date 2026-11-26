@@ -55,8 +55,8 @@ local CLASS_TREES = {
     PALADIN = { ["Holy"] = true, ["Protection"] = false, ["Retribution"] = false },
 }
 
-local INSPECT_INTERVAL = 2          -- seconds between inspect requests
-local INSPECT_TIMEOUT  = 4          -- give up waiting for talent data after this
+local INSPECT_INTERVAL = 3          -- seconds between talent requests
+local INSPECT_TIMEOUT  = 10         -- give up waiting for a talent reply after this
 local INSPECT_RETRY    = 90         -- wait before retrying someone whose inspect failed
 local SPEC_REFRESH     = 30 * 60    -- re-inspect known specs after this (respecs)
 local SPEC_EXPIRE      = 14 * 24 * 3600
@@ -284,41 +284,62 @@ function IB:ParseCombat(msg)
     end
 end
 
--- Reads talent tabs (own, or the inspected unit's when inspect is true).
--- Returns heal points, best other tree, "a/b/c" string; nil if the tabs don't belong to class.
-local function ReadTalents(class, inspect)
+-- Reads the player's own talent tabs.
+-- Returns heal points, best other tree, "a/b/c"; nil if the tabs don't belong to class.
+local function ReadOwnTalents(class)
     local trees = CLASS_TREES[class]
     if not trees then return nil end
-    local _
-    local heal, other, total, parts = 0, 0, 0, {}
+    local heal, other, parts = 0, 0, {}
     for i = 1, 3 do
-        local tabName, pts
-        if inspect then
-            tabName, _, pts = GetTalentTabInfo(i, 1)
-        else
-            tabName, _, pts = GetTalentTabInfo(i)
-        end
+        local tabName, _, pts = GetTalentTabInfo(i)
         if not tabName or trees[tabName] == nil then return nil end
         pts = pts or 0
-        total = total + pts
         if trees[tabName] then heal = heal + pts else other = math.max(other, pts) end
         table.insert(parts, pts)
     end
-    return heal, other, table.concat(parts, "/"), total
+    return heal, other, table.concat(parts, "/")
 end
 
 function IB:CheckSelfSpec()
     local _, class = UnitClass("player")
-    local heal, other = ReadTalents(class, false)
+    local heal, other = ReadOwnTalents(class)
     selfHealer = heal ~= nil and heal >= other
 end
 
 ---------------------------------------------------------------------------
--- talent inspection queue (Turtle WoW / 1.18: inspect works at any range)
+-- talent inspection (Turtle WoW protocol)
+--
+-- Turtle doesn't use NotifyInspect for talents. Its own Inspect > Talents tab
+-- whispers a hidden addon message "INSTalentShow" through the server, and the
+-- other player's client (Turtle_General, always loaded) replies with:
+--   INSTalentTabInfo;tree;treeName;...    (one per tree)
+--   INSTalentInfo;tree;idx;name;tier;col;currRank;maxRank;...   (one per talent)
+--   INSTalentEND;
+-- Points per tree are summed from currRank, which doesn't depend on the
+-- TabInfo field order (that has differed between client versions).
 ---------------------------------------------------------------------------
-local pending          -- { name, unit, class, time }
+local TALENT_PREFIX = "TW_CHAT_MSG_WHISPER"
+-- tree index fallback if tree names don't come through
+local HEAL_TAB_INDEX = {
+    DRUID = { [3] = true }, PRIEST = { [1] = true, [2] = true },
+    SHAMAN = { [3] = true }, PALADIN = { [1] = true },
+}
+
+local pending          -- request in flight
 local nextInspect = 0
-local inspectSupported = nil   -- set true once INSPECT_TALENT_READY is seen
+local inspectSupported = nil   -- true once any talent reply has arrived
+local stats = { sent = 0, answered = 0 }
+IB.debug = false
+
+local function Debug(msg)
+    if IB.debug then DEFAULT_CHAT_FRAME:AddMessage("|cff888888[IB debug]|r " .. msg) end
+end
+
+local function Split(msg)
+    local t = {}
+    for part in string.gfind(msg, "[^;]+") do table.insert(t, part) end
+    return t
+end
 
 local function NeedsInspect(e, now)
     if not IB.HEAL_CLASSES[e.class] or e.name == playerName then return false end
@@ -328,46 +349,152 @@ local function NeedsInspect(e, now)
     return true
 end
 
-function IB:InspectTick()
-    if not db.useTalents or db.detectMode == "MANUAL" then return end
+local function BeginInspect(name, class, manual)
     local now = GetTime()
-    if pending then
-        if now - pending.time > INSPECT_TIMEOUT then
-            local e = rosterByName[pending.name]
-            if e then e.inspectFail = now end
-            pending = nil
+    pending = { name = name, class = class, time = now, manual = manual,
+                ranks = { 0, 0, 0 }, tabs = {}, infoLines = 0 }
+    nextInspect = now + INSPECT_INTERVAL
+    stats.sent = stats.sent + 1
+    local ok, err = pcall(SendAddonMessage, TALENT_PREFIX .. "<" .. name .. ">", "INSTalentShow", "GUILD")
+    Debug("-> INSTalentShow to " .. name .. (ok and "" or (" |cffff5555failed: " .. tostring(err) .. "|r")))
+    if not ok then pending = nil end
+end
+
+local function FailInspect(p, why)
+    local e = rosterByName[p.name]
+    if e then e.inspectFail = GetTime() end
+    Debug("x " .. p.name .. ": " .. why)
+    if p.manual and not IB.debug then IB:Print(p.name .. ": " .. why) end
+end
+
+local function FinishInspect()
+    local p = pending
+    pending = nil
+    stats.answered = stats.answered + 1
+    inspectSupported = true
+
+    local trees = CLASS_TREES[p.class]
+    local byName = trees ~= nil
+    for t = 1, 3 do
+        local tab = p.tabs[t]
+        if not tab or not trees or trees[tab] == nil then byName = false end
+    end
+
+    local heal, other, total, parts = 0, 0, 0, {}
+    for t = 1, 3 do
+        local pts = p.ranks[t]
+        local isHeal
+        if byName then
+            isHeal = trees[p.tabs[t]]
+        else
+            isHeal = HEAL_TAB_INDEX[p.class] and HEAL_TAB_INDEX[p.class][t]
+        end
+        if isHeal then heal = heal + pts else other = math.max(other, pts) end
+        total = total + pts
+        table.insert(parts, pts)
+    end
+    local ptsStr = table.concat(parts, "/")
+    Debug(string.format("<- END from %s: %d talent lines, trees %s, points %s",
+        p.name, p.infoLines, byName and "by name" or "by index", ptsStr))
+
+    if p.infoLines == 0 or total == 0 then
+        FailInspect(p, "reply had no talent points")
+        return
+    end
+    db.specs[p.name] = { class = p.class, h = heal, o = other, pts = ptsStr, t = time() }
+    local e = rosterByName[p.name]
+    if e then e.inspectFail = nil end
+    local role = heal >= other and "|cff4cff66healer|r" or "|cffff6666dps|r"
+    Debug(p.name .. " = " .. role)
+    if p.manual and not IB.debug then IB:Print(p.name .. ": " .. ptsStr .. " - " .. role) end
+    NotifyOptions()
+end
+
+function IB:OnAddonMessage(prefix, msg, sender)
+    if not msg or not string.find(msg, "^INSTalent") then return end
+    if not (pending and sender == pending.name) then
+        if IB.debug and not string.find(msg, "^INSTalentInfo") then
+            Debug("(ignored, not ours) " .. tostring(sender) .. ": " .. msg)
         end
         return
     end
+    if string.find(msg, "^INSTalentEND") then
+        FinishInspect()
+    elseif string.find(msg, "^INSTalentTabInfo") then
+        local parts = Split(msg)
+        local t = tonumber(parts[2])
+        if t and t >= 1 and t <= 3 then pending.tabs[t] = parts[3] end
+        Debug("<- " .. msg)
+    elseif string.find(msg, "^INSTalentInfo") then
+        local parts = Split(msg)
+        local t, rank = tonumber(parts[2]), tonumber(parts[7])
+        if t and t >= 1 and t <= 3 and rank then
+            pending.ranks[t] = pending.ranks[t] + rank
+            pending.infoLines = pending.infoLines + 1
+        end
+    end
+end
+
+function IB:InspectTick()
+    local now = GetTime()
+    if pending then
+        if now - pending.time > INSPECT_TIMEOUT then
+            local p = pending
+            pending = nil
+            FailInspect(p, "no reply (their client didn't answer)")
+        end
+        return
+    end
+    if not db.useTalents or db.detectMode == "MANUAL" then return end
     if now < nextInspect then return end
     if UnitAffectingCombat("player") then return end
-    if InspectFrame and InspectFrame:IsVisible() then return end -- don't hijack the player's inspect
+    -- replies also feed Turtle's own Inspect > Talents tab, so leave it alone while open
+    if InspectFrame and InspectFrame:IsVisible() then return end
     for i = 1, table.getn(roster) do
         local e = roster[i]
         if NeedsInspect(e, now) and UnitIsConnected(e.unit) and UnitName(e.unit) == e.name then
-            pending = { name = e.name, unit = e.unit, class = e.class, time = now }
-            nextInspect = now + INSPECT_INTERVAL
-            NotifyInspect(e.unit)
+            BeginInspect(e.name, e.class, false)
             return
         end
     end
 end
 
-function IB:OnInspectTalentReady()
-    inspectSupported = true
-    if not pending then return end
-    local p = pending
-    pending = nil
-    local e = rosterByName[p.name]
-    local heal, other, pts, total = ReadTalents(p.class, true)
-    -- tab names must match their class and someone level 10+ has points spent
-    if not heal or total == 0 then
-        if e then e.inspectFail = GetTime() end
+-- /ib inspect [name]: ask one player now (target if no name)
+function IB:InspectNow(name)
+    if not name or name == "" then
+        if not (UnitExists("target") and UnitIsPlayer("target")) then
+            self:Print("Usage: /ib inspect <name>, or target a player.")
+            return
+        end
+        name = UnitName("target")
+    end
+    name = Normalize(name)
+    local e = rosterByName[name]
+    local class = e and e.class
+    if not class and UnitExists("target") and UnitName("target") == name then
+        local _, c = UnitClass("target")
+        class = c
+    end
+    if not class then
+        self:Print(name .. " isn't in your group or targeted.")
         return
     end
-    db.specs[p.name] = { class = p.class, h = heal, o = other, pts = pts, t = time() }
-    if e then e.inspectFail = nil end
-    NotifyOptions()
+    if name == playerName then
+        self:Print("Your own spec is read from your talents: " .. (selfHealer and "healer" or "dps") .. ".")
+        return
+    end
+    if pending then Debug("dropping request to " .. pending.name) end
+    if not IB.debug then self:Print("Asking " .. name .. " for talents...") end
+    BeginInspect(name, class, true)
+end
+
+function IB:ToggleDebug()
+    IB.debug = not IB.debug
+    if IB.debug then
+        self:Print("Inspect debug on - talent requests and replies print to chat. /ib debug again to stop.")
+    else
+        self:Print("Inspect debug off.")
+    end
 end
 
 function IB:InspectStatus()
@@ -384,17 +511,26 @@ function IB:InspectStatus()
 end
 
 function IB:PrintSpecs()
-    local known, total, ok = self:InspectStatus()
-    self:Print(string.format("Talent specs known for %d/%d healing-class group members.", known, total))
-    if ok == nil and total > 0 then
-        DEFAULT_CHAT_FRAME:AddMessage("  |cff999999No talent inspect reply seen yet this session.|r")
-    end
+    local known, total = self:InspectStatus()
+    self:Print(string.format("Talent specs known for %d/%d healing-class group members. This session: %d asked, %d answered.",
+        known, total, stats.sent, stats.answered))
+    local now = GetTime()
     for i = 1, table.getn(roster) do
         local e = roster[i]
-        local s = db.specs[e.name]
-        if IB.HEAL_CLASSES[e.class] and s and s.class == e.class then
-            DEFAULT_CHAT_FRAME:AddMessage(string.format("  %s (%s): %s - %s", e.name, string.lower(e.class),
-                s.pts, s.h >= s.o and "|cff4cff66healer|r" or "|cffff6666dps|r"))
+        if IB.HEAL_CLASSES[e.class] and e.name ~= playerName then
+            local s = db.specs[e.name]
+            local line
+            if s and s.class == e.class then
+                line = s.pts .. " - " .. (s.h >= s.o and "|cff4cff66healer|r" or "|cffff6666dps|r")
+            elseif pending and pending.name == e.name then
+                line = "|cffaaaaaaasking...|r"
+            elseif e.inspectFail then
+                line = string.format("|cffff9933no answer|r |cff777777(retry in %ds)|r",
+                    math.max(0, math.floor(INSPECT_RETRY - (now - e.inspectFail))))
+            else
+                line = "|cff777777queued|r"
+            end
+            DEFAULT_CHAT_FRAME:AddMessage(string.format("  %s (%s): %s", e.name, string.lower(e.class or "?"), line))
         end
     end
 end
@@ -820,7 +956,7 @@ driver:RegisterEvent("SPELLS_CHANGED")
 driver:RegisterEvent("LEARNED_SPELL_IN_TAB")
 driver:RegisterEvent("CHARACTER_POINTS_CHANGED")
 if SUPERWOW_VERSION then driver:RegisterEvent("UNIT_CASTEVENT") end
-pcall(driver.RegisterEvent, driver, "INSPECT_TALENT_READY")
+driver:RegisterEvent("CHAT_MSG_ADDON")
 for i = 1, table.getn(COMBAT_EVENTS) do driver:RegisterEvent(COMBAT_EVENTS[i]) end
 
 driver:SetScript("OnEvent", function()
@@ -831,8 +967,8 @@ driver:SetScript("OnEvent", function()
     if not db then return end
     if isCombatEvent[event] then
         IB:ParseCombat(arg1)
-    elseif event == "INSPECT_TALENT_READY" then
-        IB:OnInspectTalentReady()
+    elseif event == "CHAT_MSG_ADDON" then
+        IB:OnAddonMessage(arg1, arg2, arg4)
     elseif event == "UNIT_CASTEVENT" then
         if (arg3 == "CAST" or arg3 == "CHANNEL") and SpellInfo and db.useCombatLog and db.detectMode ~= "MANUAL" then
             local ok, name = pcall(UnitName, arg1)
@@ -878,6 +1014,8 @@ local function Help()
     DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib talents [on|off]|r - detect healers by inspecting talents (default on)")
     DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib combatlog [on|off]|r - detect healers from combat log heals (default off)")
     DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib specs|r - show inspected talent specs in your group")
+    DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib inspect [name]|r - ask one player for talents now (no name = target)")
+    DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib debug|r - print talent requests and replies to chat")
     DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib rescan|r - forget detected roles and re-inspect")
     DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib test|r - toggle preview with fake data")
     DEFAULT_CHAT_FRAME:AddMessage(c .. "  /ib toggle|r - enable / disable the frame")
@@ -941,6 +1079,10 @@ SlashCmdList["INNERVATEBUDDY"] = function(msg)
         IB:Refresh(); NotifyOptions()
     elseif cmd == "specs" then
         IB:PrintSpecs()
+    elseif cmd == "inspect" then
+        IB:InspectNow(rest)
+    elseif cmd == "debug" then
+        IB:ToggleDebug()
     elseif cmd == "test" then
         IB.testMode = not IB.testMode
         IB:Print("Test mode " .. (IB.testMode and "on." or "off."))

@@ -5,7 +5,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+- `/ib inspect [name]` asks one player for their talents right away.
+- `/ib debug` prints talent requests and replies to chat.
+- `/ib specs` now also shows who hasn't answered and when they'll be asked again.
+
 ### Fixed
+- Talent detection never got any answers on Turtle WoW ("Specs inspected: 0/4 (waiting)"). Turtle doesn't send talents through the standard inspect; it uses a hidden `INSTalentShow` addon message that the other player's client answers. InnervateBuddy now uses that, the same way Turtle's own Inspect → Talents tab does. Requests go out every 3 s and wait up to 10 s for a reply.
 - Options window: "Manual list" label overlapped the name box, the remove "x" sat off its row, and the inspect status floated. The Healers section now lines up on a two-column grid.
 
 ## [1.1.0] - 2026-11-26
