@@ -2,6 +2,8 @@
 
 A small, minimal Druid addon for **Turtle WoW / 1.12 clients** that shows your group's mana users sorted by who is lowest on mana — so you always know who should get your Innervate.
 
+![InnervateBuddy frame with a healer at 34% mana and the hover tooltip showing mana, distance, role and click actions](docs/screenshot.webp)
+
 - Lists **healers** by default, with an option to include DPS mana classes
 - Shows the **5 lowest** by default (configurable 1–40)
 - **Fades out** players who are out of Innervate range (30 yd)

@@ -1,10 +1,12 @@
 * text=auto
 
-*.lua text
-*.toc text
-*.md  text
+*.lua  text
+*.toc  text
+*.md   text
+*.webp binary
 
 # Keep repo-only files out of "Download ZIP" / release archives
 .gitignore     export-ignore
 .gitattributes export-ignore
 .editorconfig  export-ignore
+/docs          export-ignore
