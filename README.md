@@ -2,7 +2,11 @@
 
 A small, minimal Druid addon for **Turtle WoW / 1.12 clients** that shows your group's mana users sorted by who is lowest on mana — so you always know who should get your Innervate.
 
-![InnervateBuddy frame with a healer at 34% mana and the hover tooltip showing mana, distance, role and click actions](docs/screenshot.webp)
+<p align="center">
+  <img src="docs/screenshot.webp" height="320" alt="InnervateBuddy frame with a healer at 34% mana and the hover tooltip showing mana, distance, role and click actions">
+  &nbsp;
+  <img src="docs/options.webp" height="320" alt="InnervateBuddy options window with display settings, sliders, healer detection controls, the manual healer list and detected healers in the group">
+</p>
 
 - Lists **healers** by default, with an option to include DPS mana classes
 - Shows the **5 lowest** by default (configurable 1–40)
