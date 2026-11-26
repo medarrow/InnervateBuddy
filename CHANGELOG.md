@@ -17,7 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Talent trees are matched by name instead of tab position.
 - "Reset detected" also clears saved talent specs.
 
-## [1.0.0] - 2026-11-26
+## 1.0.0 - 2026-11-26 (unreleased)
 
 ### Added
 - Frame listing mana users sorted by lowest mana %, class-coloured bars.
@@ -29,5 +29,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Slash commands and an options window.
 - Test mode with fake data.
 
-[1.1.0]: https://github.com/medarrow/InnervateBuddy/compare/v1.0.0...v1.1.0
-[1.0.0]: https://github.com/medarrow/InnervateBuddy/releases/tag/v1.0.0
+[1.1.0]: https://github.com/medarrow/InnervateBuddy/releases/tag/v1.1.0
