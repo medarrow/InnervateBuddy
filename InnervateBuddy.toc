@@ -1,7 +1,7 @@
 ## Interface: 11200
 ## Title: |cffff7d0aInnervate|rBuddy
 ## Notes: Shows the group's mana users sorted by lowest mana, for picking your Innervate target.
-## Version: 1.1.0
+## Version: 1.2.0
 ## Author: medarrow
 ## X-Website: https://github.com/medarrow/InnervateBuddy
 ## X-License: MIT

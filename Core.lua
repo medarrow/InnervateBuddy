@@ -4,7 +4,7 @@
 InnervateBuddy = InnervateBuddy or {}
 local IB = InnervateBuddy
 
-IB.version = "1.1.0"
+IB.version = "1.2.0"
 
 local INNERVATE       = "Innervate"
 local INNERVATE_RANGE = 30
@@ -335,6 +335,12 @@ local function Debug(msg)
     if IB.debug then DEFAULT_CHAT_FRAME:AddMessage("|cff888888[IB debug]|r " .. msg) end
 end
 
+-- the server prepends a tab (or other whitespace) to addon messages
+local function Clean(msg)
+    if not msg then return nil end
+    return (string.gsub(msg, "^%s+", ""))
+end
+
 local function Split(msg)
     local t = {}
     for part in string.gfind(msg, "[^;]+") do table.insert(t, part) end
@@ -359,6 +365,7 @@ local recentAsk = {}            -- name -> GetTime() of our last request
 local inspectHooked = false
 
 local function IsOurReply(message, sender)
+    message = Clean(message)
     if not (message and sender) then return false end
     if not string.find(message, "^INSTalent") or string.find(message, "^INSTalentShow") then return false end
     local t = recentAsk[sender]
@@ -392,7 +399,8 @@ local function BeginInspect(name, class, manual)
     local now = GetTime()
     recentAsk[name] = now
     pending = { name = name, class = class, time = now, manual = manual,
-                ranks = { 0, 0, 0 }, tabs = {}, infoLines = 0 }
+                ranks = { 0, 0, 0 }, tabs = {}, infoLines = 0,
+                tree = 0, nextIdx = 1 }   -- position in the reply; tree 0 = not started
     nextInspect = now + INSPECT_INTERVAL
     stats.sent = stats.sent + 1
     local ok, err = pcall(SendAddonMessage, TALENT_PREFIX .. "<" .. name .. ">", "INSTalentShow", "GUILD")
@@ -450,28 +458,62 @@ local function FinishInspect()
     NotifyOptions()
 end
 
+-- Throw away what's been read and wait for the start of a fresh reply.
+local function ResetReply(p, why)
+    Debug("|cffff9933" .. p.name .. ": " .. why .. ", waiting for a full reply|r")
+    p.ranks, p.tabs, p.infoLines, p.tree, p.nextIdx = { 0, 0, 0 }, {}, 0, 0, 1
+end
+
+-- A reply is TabInfo(1), Info(1,1..n), TabInfo(2), Info(2,1..n), TabInfo(3), ..., END.
+-- Another addon (e.g. ChronicleCompanion) may have asked the same player just before
+-- us, so the first lines we see can be the tail of the answer meant for it. Lines
+-- before TabInfo for tree 1 are skipped, and anything out of order is discarded.
 function IB:OnAddonMessage(prefix, msg, sender)
-    if not msg or not string.find(msg, "^INSTalent") then return end
-    if not (pending and sender == pending.name) then
+    if prefix ~= TALENT_PREFIX then return end
+    msg = Clean(msg)
+    if not msg or not string.find(msg, "^INSTalent") or string.find(msg, "^INSTalentShow") then return end
+    local p = pending
+    if not (p and sender == p.name) then
         if IB.debug and not string.find(msg, "^INSTalentInfo") then
             Debug("(ignored, not ours) " .. tostring(sender) .. ": " .. msg)
         end
         return
     end
     if string.find(msg, "^INSTalentEND") then
-        FinishInspect()
+        if p.tree == 0 then
+            Debug("(skipped end of an earlier reply from " .. sender .. ")")
+        elseif p.tree ~= 3 then
+            ResetReply(p, "reply ended after tree " .. p.tree)
+        else
+            FinishInspect()
+        end
     elseif string.find(msg, "^INSTalentTabInfo") then
         local parts = Split(msg)
         local t = tonumber(parts[2])
-        if t and t >= 1 and t <= 3 then pending.tabs[t] = parts[3] end
+        if t == 1 then
+            if p.tree ~= 0 then ResetReply(p, "a new reply started mid-way") end
+            p.tree, p.nextIdx = 1, 1
+        elseif p.tree == 0 then
+            return  -- tail of an earlier reply
+        elseif t ~= p.tree + 1 then
+            ResetReply(p, "tree " .. tostring(t) .. " arrived out of order")
+            return
+        else
+            p.tree, p.nextIdx = t, 1
+        end
+        p.tabs[t] = parts[3]
         Debug("<- " .. msg)
     elseif string.find(msg, "^INSTalentInfo") then
+        if p.tree == 0 then return end
         local parts = Split(msg)
-        local t, rank = tonumber(parts[2]), tonumber(parts[7])
-        if t and t >= 1 and t <= 3 and rank then
-            pending.ranks[t] = pending.ranks[t] + rank
-            pending.infoLines = pending.infoLines + 1
+        local t, idx, rank = tonumber(parts[2]), tonumber(parts[3]), tonumber(parts[7])
+        if t ~= p.tree or idx ~= p.nextIdx or not rank then
+            ResetReply(p, "talent line out of order")
+            return
         end
+        p.nextIdx = idx + 1
+        p.ranks[t] = p.ranks[t] + rank
+        p.infoLines = p.infoLines + 1
     end
 end
 

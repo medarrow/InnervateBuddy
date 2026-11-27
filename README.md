@@ -72,7 +72,7 @@ The detection mode decides which sources are used:
 
 Automatic detection, in order:
 
-1. **Talents (default).** Healing-class group members are asked for their talents one at a time (every 3 s, paused in combat and while your own Inspect window is open). This uses the same hidden request Turtle WoW's own *Inspect → Talents* tab sends, so it works at any range and the other player doesn't need this addon. Players whose client doesn't answer within 10 s are retried after 90 s; turn on combat log detection to cover them. A player counts as a healer if they have at least as many points in healing trees as in their largest other tree:
+1. **Talents (default).** Healing-class group members are asked for their talents one at a time (every 3 s, paused in combat and while your own Inspect window is open). This uses the same hidden request Turtle WoW's own *Inspect → Talents* tab sends, so it works at any range and the other player doesn't need this addon. Players whose client doesn't answer within 10 s are retried after 90 s; turn on combat log detection to cover them. Other addons that send the same request (such as ChronicleCompanion) can run alongside it: only complete replies are used, and InnervateBuddy keeps its replies out of your own Inspect window. A player counts as a healer if they have at least as many points in healing trees as in their largest other tree:
    - Druid: Restoration · Priest: Discipline + Holy · Shaman: Restoration · Paladin: Holy
 
    Specs are saved between sessions, refreshed every 30 minutes, and forgotten after 14 days. Your own spec is read directly from your talents.

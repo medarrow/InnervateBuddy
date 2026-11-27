@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.2.0] - 2026-11-26
 
 ### Added
 - `/ib inspect [name]` asks one player for their talents right away.
@@ -11,6 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `/ib specs` now also shows who hasn't answered and when they'll be asked again.
 
 ### Fixed
+- Talent replies were never recognised if the server put whitespace (a tab) in front of them, which also stopped the lock-up fix below from working. Leading whitespace is now stripped.
+- A reply could be read from the middle when another addon (such as ChronicleCompanion) asked the same player just before, giving a wrong point split. Only replies read complete and in order, from the first tree's header to the end, are used now; anything else is thrown away and the player is asked again later.
 - Game could lock up when changing target (e.g. targeting an NPC) after a background talent scan. Turtle's own Inspect code also processed the scan replies and stored them against your current target, sometimes opening its talent frame for it. Replies to InnervateBuddy's requests are now kept away from Turtle's Inspect code, unless you're inspecting that player yourself.
 - Talent detection never got any answers on Turtle WoW ("Specs inspected: 0/4 (waiting)"). Turtle doesn't send talents through the standard inspect; it uses a hidden `INSTalentShow` addon message that the other player's client answers. InnervateBuddy now uses that, the same way Turtle's own Inspect → Talents tab does. Requests go out every 3 s and wait up to 10 s for a reply.
 - Options window: "Manual list" label overlapped the name box, the remove "x" sat off its row, and the inspect status floated. The Healers section now lines up on a two-column grid.
@@ -41,4 +43,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Slash commands and an options window.
 - Test mode with fake data.
 
+[1.2.0]: https://github.com/medarrow/InnervateBuddy/releases/tag/v1.2.0
 [1.1.0]: https://github.com/medarrow/InnervateBuddy/releases/tag/v1.1.0

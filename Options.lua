@@ -193,7 +193,7 @@ local function CreateOptions()
         IB:Options_Refresh()
     end)
 
-    CheckBox("useTalents", "Inspect talents", "Auto-detect healers by inspecting group members' talent specs (Turtle WoW / 1.18 allows inspecting at any range). One request every 2s, paused in combat and while your Inspect window is open.", COL_L, -318)
+    CheckBox("useTalents", "Inspect talents", "Auto-detect healers by inspecting group members' talent specs (Turtle WoW / 1.18 allows inspecting at any range). One request every 3s, paused in combat and while your Inspect window is open.", COL_L, -318)
     CheckBox("useCombatLog", "Use combat log", "Fallback: auto-detect healers from heals and DPS spells seen in the combat log. Useful if talent inspect doesn't work.", COL_R, -318)
 
     -- column headers
