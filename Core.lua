@@ -349,8 +349,48 @@ local function NeedsInspect(e, now)
     return true
 end
 
+-- Turtle_General hands every INSTalent reply to Blizzard_InspectUI's
+-- InspectTalentsFrame_HandleMessage, which stores it against whatever you have
+-- targeted right now and may pop its talent frame (CanInspect("target")).
+-- Background scans mixed another player's talents into the current target's
+-- inspect state; changing target afterwards could hang the client. So replies to
+-- our own requests are kept away from it, unless you're inspecting that player.
+local recentAsk = {}            -- name -> GetTime() of our last request
+local inspectHooked = false
+
+local function IsOurReply(message, sender)
+    if not (message and sender) then return false end
+    if not string.find(message, "^INSTalent") or string.find(message, "^INSTalentShow") then return false end
+    local t = recentAsk[sender]
+    if not t or GetTime() - t > INSPECT_TIMEOUT + 10 then return false end
+    if InspectFrame and InspectFrame:IsVisible() and UnitName("target") == sender then return false end
+    return true
+end
+
+local function HookTurtleInspect()
+    if inspectHooked then return true end
+    -- load it now, so the hook is in place before the first reply arrives
+    if type(InspectTalentsFrame_HandleMessage) ~= "function" then
+        pcall(LoadAddOn, "Blizzard_InspectUI")
+    end
+    local orig = InspectTalentsFrame_HandleMessage
+    if type(orig) ~= "function" then return false end
+    InspectTalentsFrame_HandleMessage = function(message, sender)
+        if IsOurReply(message, sender) then return end
+        return orig(message, sender)
+    end
+    inspectHooked = true
+    return true
+end
+
 local function BeginInspect(name, class, manual)
+    if not HookTurtleInspect() then
+        Debug("Turtle inspect UI not found, not sending requests")
+        nextInspect = GetTime() + 60
+        return
+    end
     local now = GetTime()
+    recentAsk[name] = now
     pending = { name = name, class = class, time = now, manual = manual,
                 ranks = { 0, 0, 0 }, tabs = {}, infoLines = 0 }
     nextInspect = now + INSPECT_INTERVAL
